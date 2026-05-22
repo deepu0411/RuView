@@ -105,6 +105,24 @@ void csi_collector_start_hop_timer(void);
 esp_err_t csi_inject_ndp_frame(void);
 
 /**
+ * Start a periodic timer that injects NDP frames at the specified interval.
+ *
+ * ADR-029 piece 2: The MGMT-only promiscuous filter combined with quiet
+ * home WiFi networks (only the AP's ~10 Hz beacons as ambient traffic)
+ * leaves the CSI pipeline starved. Active probe injection at 10 Hz
+ * provokes probe responses from APs in range, lifting the effective
+ * management-frame rate to ~20 Hz — matching the edge processor's
+ * designed sample rate.
+ *
+ * Should be called once after csi_collector_init() and after the STA
+ * is associated. Idempotent — subsequent calls are no-ops.
+ *
+ * @param period_ms Injection interval in milliseconds. ADR-029 spec is
+ *                  100 ms (10 Hz). Pass 0 to disable injection.
+ */
+void csi_collector_start_probe_injection_timer(uint32_t period_ms);
+
+/**
  * Get the recent CSI callback rate (per second).
  *
  * Computed as a sliding 1-second window over the internal s_cb_count

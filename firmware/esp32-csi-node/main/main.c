@@ -196,6 +196,12 @@ void app_main(void)
 #else
     csi_collector_init();
 
+    /* ADR-029 piece 2: Active probe injection at 10 Hz so the MGMT-only
+     * promiscuous filter has enough traffic to feed edge processing on
+     * quiet networks. Without this, single-board sensing yields ~0 Hz on
+     * typical home WiFi. */
+    csi_collector_start_probe_injection_timer(100);
+
     /* ADR-073: Start multi-frequency channel hopping if configured in NVS. */
     if (g_nvs_config.channel_hop_count > 1) {
         ESP_LOGI(TAG, "Starting channel hopping: %u channels, dwell=%lu ms",

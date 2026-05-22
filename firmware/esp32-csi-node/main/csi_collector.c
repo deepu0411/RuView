@@ -357,19 +357,31 @@ void csi_collector_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb));
 
-    /* MGMT-only promiscuous filter + active probe injection (RuView#396).
+    /* MGMT+DATA promiscuous filter (deepak.garg root-cause experiment).
      *
-     * DATA frames cause 100-500+ WiFi HW interrupts/sec which crashes Core 0
-     * in wDev_ProcessFiq (SPI flash cache race in ESP-IDF WiFi blob).
-     * MGMT-only gives ~10 Hz (beacons). Probe request injection at 10 Hz
-     * adds ~10 Hz probe responses from APs → ~20 Hz total, matching the
-     * edge processing designed sample rate of 20 Hz. */
+     * The historical MGMT-only filter (RuView#396) was set because DATA
+     * frames caused 100-500+ WiFi HW interrupts/sec → Core 0 crash in
+     * wDev_ProcessFiq (SPI flash cache race in ESP-IDF WiFi blob).
+     *
+     * The CSI callback already has a 50 Hz software early-drop gate
+     * (CSI_MIN_PROCESS_INTERVAL_US, ~line 84) that discards excess
+     * callbacks before any processing happens — that may be enough to
+     * keep the WiFi ISR healthy even with DATA-frame capture enabled.
+     * We try it: if the chip is stable, DATA frames lift the CSI sample
+     * rate from ~10 Hz (beacons only) to whatever the network actually
+     * carries (typically 50+ Hz on a normal home WiFi), making the
+     * breathing/motion DSP usable on a single board without an external
+     * illuminator.
+     *
+     * If this crashes: re-flash the build with MGMT-only and accept that
+     * single-board sensing isn't viable on this firmware. */
     wifi_promiscuous_filter_t filt = {
-        .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT,
+        .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT
+                     | WIFI_PROMIS_FILTER_MASK_DATA,
     };
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&filt));
 
-    ESP_LOGI(TAG, "Promiscuous mode enabled (MGMT-only, RuView#396)");
+    ESP_LOGI(TAG, "Promiscuous mode enabled (MGMT+DATA, root-cause test)");
 
 #if CONFIG_SOC_WIFI_HE_SUPPORT
     /* Wi-Fi 6 targets (e.g. ESP32-C6): wifi_csi_config_t is wifi_csi_acquire_config_t
@@ -572,37 +584,127 @@ void csi_collector_start_hop_timer(void)
 esp_err_t csi_inject_ndp_frame(void)
 {
     /*
-     * TODO: Construct a proper 802.11 Null Data Packet frame.
+     * Broadcast 802.11 probe request frame.
      *
-     * A real NDP is preamble-only (~24 us airtime, no payload) and is the
-     * sensing-first TX mechanism described in ADR-029. For now we send a
-     * minimal null-data frame as a placeholder so the API is wired up.
+     * The original v0.6.5 placeholder sent a Null DATA frame, which APs
+     * only ACK (control frame) — that doesn't provoke management traffic
+     * the MGMT-only filter can use. A broadcast probe request, on the
+     * other hand, makes every AP in range emit a probe response (a MGMT
+     * frame), which IS captured by the MGMT-only filter and triggers a
+     * CSI callback. That's the mechanism described in ADR-029.
      *
-     * Frame structure (IEEE 802.11 Null Data):
-     *   FC (2) | Duration (2) | Addr1 (6) | Addr2 (6) | Addr3 (6) | SeqCtl (2)
-     *   = 24 bytes total, no body, no FCS (hardware appends FCS).
+     * Frame structure (IEEE 802.11 Probe Request):
+     *   FC (2) | Duration (2) | Addr1=BCST (6) | Addr2=SRC (6) | Addr3=BCST (6) | SeqCtl (2)
+     *   + SSID element (tag=0, len=0 wildcard)
+     *   + Supported Rates element (tag=1, len=8, 1/2/5.5/11/6/9/12/18 Mbps)
+     *   = 24 header + 2 + 10 = 36 bytes total. Hardware appends FCS.
      */
-    uint8_t ndp_frame[24];
-    memset(ndp_frame, 0, sizeof(ndp_frame));
+    uint8_t frame[36];
+    memset(frame, 0, sizeof(frame));
 
-    /* Frame Control: Type=Data (0x02), Subtype=Null (0x04) -> 0x0048 */
-    ndp_frame[0] = 0x48;
-    ndp_frame[1] = 0x00;
+    /* Frame Control: Type=MGMT (0b00), Subtype=Probe Req (0b0100) -> 0x0040 */
+    frame[0] = 0x40;
+    frame[1] = 0x00;
 
-    /* Duration: 0 (let hardware fill) */
+    /* Duration: hardware fills */
 
     /* Addr1 (destination): broadcast */
-    memset(&ndp_frame[4], 0xFF, 6);
+    memset(&frame[4], 0xFF, 6);
 
-    /* Addr2 (source): will be overwritten by hardware with own MAC */
+    /* Addr2 (source): zero — driver overrides with this device's MAC. */
 
-    /* Addr3 (BSSID): broadcast */
-    memset(&ndp_frame[16], 0xFF, 6);
+    /* Addr3 (BSSID): broadcast (wildcard) */
+    memset(&frame[16], 0xFF, 6);
 
-    esp_err_t err = esp_wifi_80211_tx(WIFI_IF_STA, ndp_frame, sizeof(ndp_frame), false);
+    /* SeqCtl: hardware fills */
+
+    /* SSID element (offset 24): tag=0, length=0 — wildcard SSID */
+    frame[24] = 0x00;
+    frame[25] = 0x00;
+
+    /* Supported Rates element (offset 26): tag=1, length=8 */
+    frame[26] = 0x01;
+    frame[27] = 0x08;
+    frame[28] = 0x82;  /* 1 Mbps (basic) */
+    frame[29] = 0x84;  /* 2 Mbps (basic) */
+    frame[30] = 0x8b;  /* 5.5 Mbps (basic) */
+    frame[31] = 0x96;  /* 11 Mbps (basic) */
+    frame[32] = 0x0c;  /* 6 Mbps */
+    frame[33] = 0x12;  /* 9 Mbps */
+    frame[34] = 0x18;  /* 12 Mbps */
+    frame[35] = 0x24;  /* 18 Mbps */
+
+    esp_err_t err = esp_wifi_80211_tx(WIFI_IF_STA, frame, sizeof(frame), false);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "NDP inject failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "Probe-request inject failed: %s", esp_err_to_name(err));
     }
 
     return err;
+}
+
+/* ---- ADR-029 piece 2: periodic NDP-injection driver ----
+ *
+ * The MGMT-only promiscuous filter (see line 360) is necessary because
+ * DATA-frame capture crashes the WiFi blob. The design compensates by
+ * injecting Null Data Packets at 10 Hz so APs send back probe responses,
+ * lifting the management-frame rate to ~20 Hz. The injection function
+ * (csi_inject_ndp_frame) was implemented but no caller scheduled it in
+ * v0.6.5. This periodic timer provides that missing scheduler.
+ */
+
+static esp_timer_handle_t s_probe_inject_timer = NULL;
+static uint32_t s_probe_inject_count = 0;
+static uint32_t s_probe_inject_fail = 0;
+
+static void probe_injection_cb(void *arg)
+{
+    (void)arg;
+    esp_err_t err = csi_inject_ndp_frame();
+    if (err == ESP_OK) {
+        s_probe_inject_count++;
+    } else {
+        s_probe_inject_fail++;
+    }
+    /* Throttled heartbeat log so the serial console shows the injector is
+     * alive without spamming: one line per 100 injections (~10 s at 10 Hz). */
+    if (s_probe_inject_count > 0 && (s_probe_inject_count % 100) == 0) {
+        ESP_LOGI(TAG, "Probe inject heartbeat: %lu ok, %lu fail",
+                 (unsigned long)s_probe_inject_count,
+                 (unsigned long)s_probe_inject_fail);
+    }
+}
+
+void csi_collector_start_probe_injection_timer(uint32_t period_ms)
+{
+    if (s_probe_inject_timer != NULL) {
+        ESP_LOGW(TAG, "Probe injection timer already started — ignoring");
+        return;
+    }
+    if (period_ms == 0) {
+        ESP_LOGI(TAG, "Probe injection disabled (period_ms=0)");
+        return;
+    }
+
+    const esp_timer_create_args_t args = {
+        .callback = &probe_injection_cb,
+        .arg      = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name     = "probe_inject",
+    };
+    esp_err_t err = esp_timer_create(&args, &s_probe_inject_timer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Probe inject timer create failed: %s", esp_err_to_name(err));
+        s_probe_inject_timer = NULL;
+        return;
+    }
+    err = esp_timer_start_periodic(s_probe_inject_timer,
+                                   (uint64_t)period_ms * 1000ULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Probe inject timer start failed: %s", esp_err_to_name(err));
+        esp_timer_delete(s_probe_inject_timer);
+        s_probe_inject_timer = NULL;
+        return;
+    }
+    ESP_LOGI(TAG, "Probe injection timer started: period=%lu ms (RuView ADR-029)",
+             (unsigned long)period_ms);
 }
