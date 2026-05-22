@@ -4,6 +4,8 @@
 **Approved plan file:** `C:\Users\Draunzer\.claude\plans\witty-herding-crab.md`
 **Goal:** 2× ESP32-S3 DevKits → WiFi-CSI sensing → Home Assistant via custom MQTT bridge + 12 automations.
 
+**External HA URL** (confirmed by user 2026-05-22): `https://home.homeboxlab.uk` — usable from any remote agent or off-LAN tooling that needs to query HA. Use `HA_TOKEN` from `D:\dev\ha\.env` as Bearer auth.
+
 **Status TL;DR (2026-05-22 evening):** Both ESP32 boards flashed and provisioned with custom firmware (MGMT+DATA filter + 10 Hz probe injection scheduler). HA shows live presence, breathing rate, heart rate, motion energy, person count, activity. 12 automations deployed and enabled. UDP relay persisted via Startup-folder VBS launcher.
 
 Board inventory:
@@ -32,6 +34,14 @@ Expected daily volume: ~18–35 Telegram messages. Disable via `input_boolean.ru
 ---
 
 ## 📋 Backlog (for future sessions)
+
+### 🟢 Active — sleep watch for the night of 2026-05-22 → 2026-05-23
+
+The user explicitly asked to "watch sleep detection tonight". The remote-/schedule path was offered but declined; instead the user will ping a fresh session in the morning. **If you are a future Claude session reading this:**
+
+1. Read `D:\dev\ha\docs\ruview\sleep-watch.md` — it has a "Morning workflow" section at the bottom with exact curl commands and the report template.
+2. Read `D:\dev\ha\docs\ruview\sleep-baseline-2026-05-22_1843.json` — pre-sleep snapshot taken at 18:43 IST.
+3. When user says "analyze last night's sleep" (or equivalent), follow the workflow in sleep-watch.md verbatim. Write `D:\dev\ha\docs\ruview\sleep-report-2026-05-23.md`. Commit + push.
 
 ### Hot — verify in the next 24–48h
 - [ ] Watch Telegram for **board availability flips** — the MGMT+DATA filter trade-off means the chip *could* crash under heavy WiFi load. If either room repeatedly goes "unavailable" without you unplugging it, plan a rollback to stock `release_bins/*.bin` (see "Rollback path" below).
@@ -67,6 +77,9 @@ Expected daily volume: ~18–35 Telegram messages. Disable via `input_boolean.ru
 | `D:\dev\ha\packages\ruview_test_notifications.yaml` | HA repo, deployed to Pi `/config/packages/` | 10 test automations + 1 toggle |
 | `D:\dev\ha\.env` | HA repo (tracked despite being secrets — user pattern) | RUVIEW_MQTT_USER, RUVIEW_MQTT_PASS appended |
 | `C:\Users\Draunzer\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\ruview-relay-startup.vbs` | Windows user Startup folder | runs `udp-relay.py` at logon |
+| `D:\dev\ha\docs\ruview\sleep-watch.md` | HA repo | what to watch tonight + morning workflow for the next Claude session |
+| `D:\dev\ha\docs\ruview\sleep-baseline-2026-05-22_1843.json` | HA repo | pre-sleep snapshot of all 20 ruview entities + 3 sleep helpers |
+| `D:\dev\ha\docs\ruview\sleep-report-<date>.md` | HA repo (created tomorrow morning) | overnight analysis output |
 
 ### Rollback path (if MGMT+DATA filter destabilizes the chip)
 
